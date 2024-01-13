@@ -83,7 +83,10 @@ fn main() {
     //         &value[1..]
     //     }).unwrap());
     // });
+    let timer = Instant::now();
     generate_file();
+    let elapsed = timer.elapsed().as_secs();
+    println!("{:?}", elapsed);
     // let city_names = std::fs::read_to_string("./city_names.csv").unwrap();
     // let contents = city_names
     //     .lines()
@@ -136,7 +139,7 @@ fn get_city<'a>() -> &'static str {
 fn generate_file() {
     let _ = std::fs::remove_file("./cities.txt");
     let mut buf = String::with_capacity(12_000_000);
-    (0..10_000_000).for_each(|_| {
+    (0..100_000_000).for_each(|_| {
         let mut rng = rand::thread_rng();
         let (name, value) = generate_city(&mut rng);
         buf += name;
