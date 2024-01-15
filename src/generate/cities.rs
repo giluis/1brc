@@ -1,3 +1,20 @@
+use unic_ucd_category::GeneralCategory;
+use unicode_segmentation::UnicodeSegmentation;
+
+fn contains_invisible_chars(s: &str) -> bool {
+    s.graphemes(true)
+        .flat_map(|g| g.chars())
+        .any(|c| match GeneralCategory::of(c) {
+            GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::Unassigned
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Surrogate
+            | GeneralCategory::SpaceSeparator => true,
+            _ => false,
+        })
+}
+
 pub static CITIES: [&str; 16856]= ["Dubai",
 "Sharjah",
 "Ajman",
