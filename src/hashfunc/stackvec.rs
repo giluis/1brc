@@ -4,6 +4,7 @@ pub struct StackVec<T, const N: usize> {
     len: usize,
 }
 
+
 impl<T, const N: usize> Index<usize> for StackVec<T, N> {
     type Output = T;
 
@@ -19,17 +20,17 @@ impl<T, const N: usize> IndexMut<usize> for StackVec<T, N> {
 }
 
 impl<T, const N: usize> StackVec<T, N> {
-    fn push(&mut self, elem: T) {
+    pub fn push(&mut self, elem: T) {
         assert!(self.len < N - 1);
         self.push_unchecked(elem)
     }
 
-    fn push_unchecked(&mut self, elem: T) {
+    pub fn push_unchecked(&mut self, elem: T) {
         self.data[self.len - 1] = elem;
         self.len += 1;
     }
 
-    const fn cap(&self) -> usize {
+    pub const fn cap(&self) -> usize {
         N
     }
 }
