@@ -1,4 +1,4 @@
-use std::{time::Instant, slice::range};
+use std::time::Instant;
 use generate::CITIES;
 use rand::prelude::Rng;
 
@@ -60,23 +60,7 @@ fn random_cities() -> Vec<&'static str> {
 }
 
 fn main() {
-    let mut hashmap = ahash::AHashMap::<&str, (usize, usize, usize, usize)> ::new();
-    let keys = random_cities();
-    for k in keys {
-        hashmap.insert(k, (0,0,0,0));
-    }
-    itertools::un CITIES.map(|c|c.chars().first().unwrap())
-
-
-    let timer = Instant::now();
-    for _ in 0..10000  {
-        // get random value in hashmap
-
-
-        // get random value from array
-
-    }
-    let elapsed = timer.elapsed(); 
+    generate_file(10_000)
 }
 
 /* Generation */
