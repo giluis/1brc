@@ -68,28 +68,15 @@ fn main() {
     let timer = Instant::now();
     let a = std::fs::read("../measurements_1000000000.txt").unwrap();
     println!("Took {} ms to read file", timer.elapsed().as_millis());
-    const NUM_THREADS: usize = 8;
     let mut start = 0;
     let mut measurements = [((0, 0), (0, 0), (0, 0), 0); 10_000];
     let mut hasher = RandomState::new().build_hasher();
-    let batch_size = a.len() / NUM_THREADS;
     let timer = Instant::now();
     while start < a.len() {
         start += fast_hash(&a, &mut hasher, &mut measurements);
         // println!("{}", a[start - 1] == b'\n');
     }
     println!("Took {:?} ms finnish", timer.elapsed().as_millis());
-    // println!("{:?}", &measurements[0..1000]);
-    // let mut starting_points = [0; NUM_THREADS];
-    // let timer = Instant::now();
-    // for i in 1..NUM_THREADS {
-    //     let mut s_idx = starting_points[i - 1] + batch_size;
-    //     while a[s_idx] != b'\n' {
-    //         s_idx += 1;
-    //     }
-    //     s_idx += 1;
-    //     starting_points[i] = s_idx;
-    // }
 }
 
 /* Generation */
