@@ -4,7 +4,6 @@ pub use cities::CITIES;
 use rand::Rng;
 
 pub fn generate_file(n:usize) {
-    let _ = std::fs::remove_file("./cities.txt");
     let num_threads = 6;
     let mut batch_size = n / num_threads;
     let mut handles = vec![];
@@ -16,12 +15,11 @@ pub fn generate_file(n:usize) {
 
         handles.push(thread::spawn(move || {
             let mut buf = String::with_capacity(15 * n / num_threads);
-            println!("thread {t}");
             (prev..prev + batch_size).for_each(|_| {
                 let mut rng = rand::thread_rng();
                 let (name, value) = generate_city(&mut rng);
                 buf += name;
-                buf.push(',');
+                buf.push(';');
                 let value = if rng.gen::<bool>() {
                     &value[..]
                 } else {
@@ -36,16 +34,12 @@ pub fn generate_file(n:usize) {
     }
     let mut buf = String::with_capacity(15 * n);
 
-    println!("Before join");
     for t in handles {
         buf += &t.join().unwrap()
     }
 
-    assert_eq!(prev, n);
-    println!("{}", buf.capacity() - buf.len());
-    println!("{}", buf.len());
 
-    File::create("./cities.txt")
+    File::create(format!("measurements_{n}.txt"))
         .unwrap()
         .write_all(buf.as_bytes())
         .unwrap();

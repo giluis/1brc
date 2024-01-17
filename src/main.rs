@@ -1,14 +1,10 @@
-<<<<<<< HEAD
-use std::time::Instant;
-=======
 use ahash::{AHasher, HashMap, RandomState};
->>>>>>> 9780846... drop custom hash, use ahasher
 use generate::CITIES;
 use rand::{prelude::Rng, seq::SliceRandom};
+use std::time::Instant;
 use std::{
     fs::read,
     hash::{BuildHasher, Hasher},
-    time::Instant,
 };
 
 use crate::generate::generate_file;
@@ -51,10 +47,10 @@ fn fast_hash(
         i += 1
     }
     let n = if s[i + 1] == b'.' {
-        i+=4;
+        i += 4;
         ((s[i] - b'0'), (s[i + 2] - b'0'))
     } else {
-        i+=5;
+        i += 5;
         ((s[i] - b'0') * 10 + (s[i + 1] - b'0'), (s[i + 3] - b'0'))
     };
     // skip the '.'
@@ -69,24 +65,20 @@ fn fast_hash(
 }
 
 fn main() {
-    generate_file(10_000);
-    generate_file(10_000_000);
-    generate_file(1_000_000_000);
-    // let timer = Instant::now();
-    // let a = std::fs::read("../measurements_10000.txt").unwrap();
-    // println!("Took {} ms to read file", timer.elapsed().as_millis());
-    // const NUM_THREADS: usize = 8;
-    // let mut start = 0;
-    // let mut measurements = [((0, 0), (0, 0), (0, 0), 0); 10_000];
-    // let mut hasher = RandomState::new().build_hasher();
-    // let batch_size = a.len() / NUM_THREADS;
-    // let timer = Instant::now();
-
-    // while start < a.len() {
-    //     start += fast_hash(&a, &mut hasher, &mut measurements);
-    //     // println!("{}", a[start - 1] == b'\n');
-    // }
-    // println!("Took {:?} ms finnish", timer.elapsed().as_millis());
+    let timer = Instant::now();
+    let a = std::fs::read("../measurements_1000000000.txt").unwrap();
+    println!("Took {} ms to read file", timer.elapsed().as_millis());
+    const NUM_THREADS: usize = 8;
+    let mut start = 0;
+    let mut measurements = [((0, 0), (0, 0), (0, 0), 0); 10_000];
+    let mut hasher = RandomState::new().build_hasher();
+    let batch_size = a.len() / NUM_THREADS;
+    let timer = Instant::now();
+    while start < a.len() {
+        start += fast_hash(&a, &mut hasher, &mut measurements);
+        // println!("{}", a[start - 1] == b'\n');
+    }
+    println!("Took {:?} ms finnish", timer.elapsed().as_millis());
     // println!("{:?}", &measurements[0..1000]);
     // let mut starting_points = [0; NUM_THREADS];
     // let timer = Instant::now();
