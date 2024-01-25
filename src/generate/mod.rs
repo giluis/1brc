@@ -1,9 +1,18 @@
 mod cities;
-use std::{fs::File, io::prelude::Write, thread};
 pub use cities::CITIES;
-use rand::Rng;
+use rand::{prelude::SliceRandom, Rng};
+use std::{fs::File, io::prelude::Write, thread};
 
-pub fn generate_file(n:usize) {
+lazy_static::lazy_static! {
+    static ref CITY_IDXS: [usize; 10] = gen();
+}
+
+fn gen() -> [usize; 10] {
+    let mut rng = rand::thread_rng();
+    [(); 10].map(|_| rng.gen_range(0..CITIES.len()))
+}
+
+pub fn generate_file(n: usize) {
     let num_threads = 6;
     let mut batch_size = n / num_threads;
     let mut handles = vec![];
@@ -20,12 +29,7 @@ pub fn generate_file(n:usize) {
                 let (name, value) = generate_city(&mut rng);
                 buf += name;
                 buf.push(';');
-                let value = if rng.gen::<bool>() {
-                    &value[..]
-                } else {
-                    &value[1..]
-                };
-                buf += std::str::from_utf8(value).unwrap();
+                buf += std::str::from_utf8(&value).unwrap();
                 buf.push('\n');
             });
             buf
@@ -38,34 +42,31 @@ pub fn generate_file(n:usize) {
         buf += &t.join().unwrap()
     }
 
-
     File::create(format!("measurements_{n}.txt"))
         .unwrap()
         .write_all(buf.as_bytes())
         .unwrap();
 }
 
-fn generate_city<'a>(rng: &mut impl Rng) -> (&'a str, [u8; 5]) {
+fn generate_city(rng: &mut impl Rng) -> (&str, Vec<u8>) {
     let name = get_city();
     let whole_part = rng.gen_range(0u8..99u8);
     let decimal_part = rng.gen_range(0u8..=9u8);
-    (
-        name,
-        [
-            45,
-            if whole_part >= 9 {
-                0 + 48
-            } else {
-                whole_part / 10 + 48
-            },
-            whole_part % 10 + 48,
-            46,
-            decimal_part + 48,
-        ],
-    )
+    let mut value = vec![];
+    let is_negative = rng.gen::<bool>();
+    if is_negative {
+        value.push(b'-');
+    }
+    if whole_part > 9 {
+        value.push(48 + whole_part / 10);
+    }
+    value.push(48 + whole_part % 10);
+    value.push(b'.');
+    value.push(48 + decimal_part);
+    (name, value)
 }
 
 fn get_city() -> &'static str {
-    let idx = rand::thread_rng().gen_range(0..cities::CITIES.len());
-    CITIES[idx]
+    let idx = CITY_IDXS.choose(&mut rand::thread_rng()).unwrap();
+    CITIES[*idx]
 }
