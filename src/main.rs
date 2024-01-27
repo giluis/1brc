@@ -4,6 +4,7 @@ use std::io::prelude::Write;
 use std::io::stdout;
 
 mod baseline;
+#[allow(dead_code)]
 mod generate;
 mod record;
 
