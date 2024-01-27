@@ -6,7 +6,6 @@ use std::io::stdout;
 mod baseline;
 mod generate;
 mod record;
-mod hashfunc;
 
 /**
  * Returns shift necessary for next_starting_point
