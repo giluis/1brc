@@ -1,1 +1,1 @@
-{Lenbe=-7.3/8/2.1,Makakilo=-9.7/7.6/-0.8,JbaÃ¯l=-6.1/7/2.5,Kuznetsovsâ€™k=-7.7/9.6/-0.8,Hawassa=-8.1/7.8/-0.7,Chimaltenango=-8.4/9.3/1.3,Pervomaysâ€™k=-8.6/8.7/-0.6,Kamensk-Shakhtinskiy=-5.2/9.9/1.9,Friendswood=-8.2/4.7/-1.9,Kufstein=-9.4/9.2/-0,}
+{Kolasib=-17.6/67.4/30.6,Chicholi=-89.8/80.9/1,Fulda=-96/65.2/-33.9,Sevilla=-85.3/77.9/0.7,Konstantinovsk=-90.3/96.4/4.4,Isieke=-95.7/97.2/0.7,Freudenberg=-87.4/82.9/5.7,Bozeman=-64/96.3/11.3,Bambang=-95.4/3/-50.6,Steffisburg=-63.2/87/29,}
