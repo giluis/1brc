@@ -1,26 +1,18 @@
 #![allow(clippy::type_complexity)]
 #![feature(let_chains)]
-use itertools::Itertools;
+
 use memmap2::MmapOptions;
 use record::Record;
 use std::{io::{stdout, Write}, time::Instant};
 
+#[allow(dead_code)]
 mod baseline;
+
 #[allow(dead_code)]
 mod generate;
 mod record;
 
-const NUM_CITIES: usize = 10_000;
-const CITIES_INFO_SIZE: usize = NUM_CITIES * 6;
 
-fn collision_hash(s: &[u8]) -> usize {
-    let mut hash = 0xcbf29ce484222325u64;
-    for c in s {
-        hash ^= *c as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    (hash % (NUM_CITIES * 6) as u64) as usize
-}
 /**
  * Idx and len
  */
