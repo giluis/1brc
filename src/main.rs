@@ -40,14 +40,14 @@ fn hash(s: &[u8], start: usize) -> (usize, usize) {
     (idx, i)
 }
 struct MeasurementsGeneric<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>(
-    [[(Option<&'a [u8]>, Record); BUCKET_DEPTH]; NUM_BUCKETS],
+    [[Option<Record<'a>>; BUCKET_DEPTH]; NUM_BUCKETS],
 );
 
 impl<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>
     MeasurementsGeneric<'a, NUM_BUCKETS, BUCKET_DEPTH>
 {
     fn new() -> Self {
-        Self([[(None, Record::empty()); BUCKET_DEPTH]; NUM_BUCKETS])
+        Self([[None; BUCKET_DEPTH]; NUM_BUCKETS])
     }
 
     const fn total_size() -> usize {
@@ -62,17 +62,16 @@ impl<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>
         // TODO: get unchecked
         let values_for_hash = self.0.get_mut(hashed_idx).unwrap();
         for stored_city in values_for_hash.iter_mut() {
-            match stored_city.0 {
-                Some(sc) if sc == city_name => stored_city.1.process(value),
+            match stored_city {
+                Some(sc) if sc.name == city_name => sc.process(value),
                 None => {
-                    stored_city.0 = Some(city_name); 
-                    stored_city.1.process(value);
-                    break;
+                    * stored_city = Some(Record::new_with_initial(city_name,value)); 
+                    return;
                 }
                 _ => continue,
             }
-            break;
         }
+        unreachable!("Loop should have gotten to an empty bucket");
     }
 
 }
@@ -139,21 +138,19 @@ fn improved_parsing() {
 
     let mut buf = Vec::with_capacity(Measurements::total_size() * (14 + 15));
 
-    let mut measurements_flat: [(Option<&[u8]>, Record); Measurements::total_size()] = unsafe {
+    let mut measurements_flat: [Option<Record>; Measurements::total_size()] = unsafe {
         // Using `std::mem::transmute` to perform the conversion.
         // Safety: This is safe because the source and target types have the same total size,
         // and `u8` elements do not have alignment requirements or invalid states.
         std::mem::transmute(measurements)
     };
 
-    measurements_flat.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    measurements_flat.sort_unstable();
     measurements_flat
         .into_iter()
-        .filter(|(o,_)|o.is_some())
-        .for_each(|(city_name, record)| {
-            if let Some(name) = city_name {
-                write_city(&mut buf, name, record);
-            }
+        .flatten()
+        .for_each(|record| {
+            write_city(&mut buf, record);
         });
 
     // println!("{:?}", measurements_flat.iter().rev());
@@ -166,16 +163,16 @@ fn improved_parsing() {
 
 fn write_city(
     buff: &mut Vec<u8>,
-    city_name: &[u8],
     // TODO: check pass by reference
     Record {
+        name,
         min,
         max,
         sum,
         count,
     }: Record,
 ) {
-    buff.extend_from_slice(city_name);
+    buff.extend_from_slice(name);
     buff.push(b'=');
     write_n(buff, min);
     buff.push(b'/');
