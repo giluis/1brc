@@ -1,60 +1,111 @@
-use baseline::baseline;
+#![allow(clippy::type_complexity)]
+#![feature(let_chains)]
+use itertools::Itertools;
+use memmap2::MmapOptions;
 use record::Record;
-use std::io::prelude::Write;
-use std::io::stdout;
+use std::{io::{stdout, Write}, time::Instant};
 
 mod baseline;
 #[allow(dead_code)]
 mod generate;
 mod record;
 
+const NUM_CITIES: usize = 10_000;
+const CITIES_INFO_SIZE: usize = NUM_CITIES * 6;
+
+fn collision_hash(s: &[u8]) -> usize {
+    let mut hash = 0xcbf29ce484222325u64;
+    for c in s {
+        hash ^= *c as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash % (NUM_CITIES * 6) as u64) as usize
+}
 /**
- * Returns shift necessary for next_starting_point
+ * Idx and len
  */
-fn fast_hash<'a>(
-    s: &'a [u8],
-    start: usize,
-    // hasher: &mut ahash::AHasher,
-    measurements: &mut [(Option<&'a [u8]>, Record)],
-) -> usize {
+fn hash(s: &[u8], start: usize) -> (usize, usize) {
     let mut hash = 0xcbf29ce484222325u64;
     // TODO: unchecked indexing
     let mut i = start;
     // TODO: check from the back instead of the front of the string
     // Saves this while loop, but makes check more complicated
     // Might work for longer string names
-    while s[i] != b';' {
-        hash ^= s[i] as u64;
+    while unsafe{*s.get_unchecked(i)} != b';' {
+        hash ^= unsafe{*s.get_unchecked(i)} as u64;
         hash = hash.wrapping_mul(0x100000001b3);
-        i += 1;
+        i += 1
     }
-    // hasher.write(&s[start..i - 1]);
-    // let _ = dbg!(String::from_utf8(s[start..i].into()));
-    let idx = (hash % 10_000) as usize;
-    if measurements[idx].0.is_none() {
-        measurements[idx].0 = Some(&s[start..i])
+    let  idx = (hash % Measurements::num_buckets() as u64) as usize;
+    (idx, i)
+}
+struct MeasurementsGeneric<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>(
+    [[(Option<&'a [u8]>, Record); BUCKET_DEPTH]; NUM_BUCKETS],
+);
+
+impl<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>
+    MeasurementsGeneric<'a, NUM_BUCKETS, BUCKET_DEPTH>
+{
+    fn new() -> Self {
+        Self([[(None, Record::empty()); BUCKET_DEPTH]; NUM_BUCKETS])
     }
 
-    i += 1;
-    let is_negative = s[i] == b'-';
+    const fn total_size() -> usize {
+        NUM_BUCKETS * BUCKET_DEPTH
+    }
+
+    const fn num_buckets() -> usize {
+        NUM_BUCKETS
+    }
+
+    fn process_at(&mut self, hashed_idx: usize, city_name: &'a [u8], value: u16) {
+        // TODO: get unchecked
+        let values_for_hash = self.0.get_mut(hashed_idx).unwrap();
+        for stored_city in values_for_hash.iter_mut() {
+            match stored_city.0 {
+                Some(sc) if sc == city_name => stored_city.1.process(value),
+                None => {
+                    stored_city.0 = Some(city_name); 
+                    stored_city.1.process(value);
+                    break;
+                }
+                _ => continue,
+            }
+            break;
+        }
+    }
+
+}
+
+/**
+ * Returns shift necessary for next_starting_point
+ */
+fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &mut Measurements<'a>) -> usize {
+    let (hashed_idx, name_end) = hash(s, start);
+
+    // skip ';'
+    let mut i = name_end + 1;
+
+    let is_negative = unsafe{*s.get_unchecked(i)} == b'-';
     if is_negative {
+        // skip '-', if it exists
         i += 1
     }
 
     let mut value = 0;
     // TODO: Check loop unrolled instead of *100 , *10
-    if s[i + 1] == b'.' {
+    if unsafe{*s.get_unchecked(i + 1)} == b'.' {
         // handle a.b
-        value = (s[i] - 48) as u16 * 10;
+        value = (unsafe{*s.get_unchecked(i)} - 48) as u16 * 10;
         i += 2;
-        value += (s[i] - 48) as u16;
-    } else if s[i + 2] == b'.' {
+        value += (unsafe{*s.get_unchecked(i)} - 48) as u16;
+    } else if unsafe{*s.get_unchecked(i + 2)} == b'.' {
         // handle ab.c
-        value = (s[i] - 48) as u16 * 100;
+        value = (unsafe{*s.get_unchecked(i)} - 48) as u16 * 100;
         i += 1;
-        value += (s[i] - 48) as u16 * 10;
+        value += (unsafe{*s.get_unchecked(i)} - 48) as u16 * 10;
         i += 2;
-        value += (s[i] - 48) as u16;
+        value += (unsafe{*s.get_unchecked(i)} - 48) as u16;
     }
 
     if is_negative {
@@ -63,32 +114,54 @@ fn fast_hash<'a>(
         value += 999;
     }
 
-    // TODO: check pass by copy instead of reference
-    measurements[idx].1.process(value);
+    measurements.process_at(hashed_idx, &s[start..name_end], value);
     // skip paragraph
     (i + 2) - start
 }
 
-fn improved_parsing(size: usize) {
-    let source = std::fs::read(format!("../measurements_{size}.txt")).unwrap();
+type Measurements<'a> = MeasurementsGeneric<'a, 10_000, 3>;
+
+fn improved_parsing() {
+    let timer = Instant::now();
+    let source = std::fs::File::open("../measurements_1000000000.txt").unwrap();
+    let file_len = source.metadata().unwrap().len() as usize;
+    let source = unsafe { MmapOptions::new().map(&source).unwrap() };
+    // let source = std::fs::read(format!("../measurements_{size}.txt")).unwrap();
+    // let file_len = source.len();
+    println!("Took {:?} to read file", timer.elapsed());
     let mut start = 0;
     // TODO: check transmute [0u64;20_000] here (Option<&str> takes as much space as &str)
-    let mut measurements = [(None, Record::empty()); 10_000];
+    let mut measurements = Measurements::new();
     // let mut hasher = RandomState::new().build_hasher();
-    while start < source.len() {
+    while start < file_len {
         start += fast_hash(&source, start, &mut measurements);
     }
-    let mut buf = Vec::with_capacity(10_000 * (14 + 15));
-    measurements.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-    measurements.into_iter().for_each(|(city_name, record)| {
-        if let Some(name) = city_name {
-            // dbg!(String::from_utf8(name.into()));
-            write_city(&mut buf, name, record);
-        }
-    });
+
+    let mut buf = Vec::with_capacity(Measurements::total_size() * (14 + 15));
+
+    let mut measurements_flat: [(Option<&[u8]>, Record); Measurements::total_size()] = unsafe {
+        // Using `std::mem::transmute` to perform the conversion.
+        // Safety: This is safe because the source and target types have the same total size,
+        // and `u8` elements do not have alignment requirements or invalid states.
+        std::mem::transmute(measurements)
+    };
+
+    measurements_flat.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    measurements_flat
+        .into_iter()
+        .filter(|(o,_)|o.is_some())
+        .for_each(|(city_name, record)| {
+            if let Some(name) = city_name {
+                write_city(&mut buf, name, record);
+            }
+        });
+
+    // println!("{:?}", measurements_flat.iter().rev());
+
     let len = buf.len();
     buf[len - 1] = b'}';
     stdout().lock().write_all(&buf).unwrap();
+    println!("\nTook {:?} to process", timer.elapsed());
 }
 
 fn write_city(
@@ -124,7 +197,7 @@ fn mean(sum: u32, count: u32) -> u16 {
 }
 
 fn write_n(buff: &mut Vec<u8>, value: u16) {
-    // TODO: check mutating value instead of assigning to real value  
+    // TODO: check mutating value instead of assigning to real value
     let mut real_value = if value < 999 {
         // TODO: check subtraction here
         buff.push(b'-');
@@ -144,51 +217,11 @@ fn write_n(buff: &mut Vec<u8>, value: u16) {
 }
 
 fn main() {
-    // let a = check(10_000, improved_parsing);
-    // improved_parsing(1_000_000_000);
-    // generate_file(100);
-    // let mut hasher = AHasher::default();
-
-    improved_parsing(100);
-    println!("\n");
-    baseline(100)
-
-    // let NUM_AVG = 10;
-
-    // let avg = (0..NUM_AVG).map(|_| {
-    //     let timer = Instant::now();
-    //     let mut n:i32 = 0;
-    //     for i in 0..100_000{
-    //         n += i * 2;
-    //         if n > 50{
-    //             n /= 100;
-    //         }
-    //         n += 10 + i;
-    //         n *= 3;
-    //     }
-    //     println!("result: {n}");
-    //     timer.elapsed().as_micros()
-    // }).sum::<u128>() / NUM_AVG;
-
-    // println!("took {}\n\n", avg);
-    // let avg = (0..NUM_AVG).map(|_| {
-    //     let timer = Instant::now();
-    //     let mut n:u32 = 0;
-    //     for i in 0..100_000{
-    //         n += i * 2;
-    //         if n > 50{
-    //             n /= 100;
-    //         }
-    //         n += 10 + i;
-    //         n *= 3;
-    //     }
-    //     println!("result: {n}");
-    //     timer.elapsed().as_micros()
-    // }).sum::<u128>() / NUM_AVG;
-    // println!("took {}\n\n", avg);
-    // println!("took {}\n\n", avg);
-    // println!("{}", (0 + 999 + 1998) / 30);
-    // println!("{}", (0 + 999 + 1998) / 3 % 10);
+    improved_parsing();
+    // println!("File has been generated");
+    // let source = std::fs::read_to_string("./measurements_1000000000.txt").unwrap();
+    // let a: AHashSet<&str> = source.lines().map(|l|l.split_once(';').unwrap().0).collect();
+    // println!("Num cities {}", a.len());
 }
 
 #[cfg(test)]

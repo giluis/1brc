@@ -1,5 +1,5 @@
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct Record {
     pub min: u16,
     pub max: u16,

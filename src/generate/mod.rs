@@ -4,12 +4,12 @@ use rand::{prelude::SliceRandom, Rng};
 use std::{fs::File, io::prelude::Write, thread};
 
 lazy_static::lazy_static! {
-    static ref CITY_IDXS: [usize; 10] = gen();
+    static ref CITY_IDXS: [usize; 10_000] = gen_city_idxs();
 }
 
-fn gen() -> [usize; 10] {
+fn gen_city_idxs() -> [usize; 10_000] {
     let mut rng = rand::thread_rng();
-    [(); 10].map(|_| rng.gen_range(0..CITIES.len()))
+    [(); 10_000].map(|_| rng.gen_range(0..CITIES.len()))
 }
 
 pub fn generate_file(n: usize) {
@@ -23,47 +23,42 @@ pub fn generate_file(n: usize) {
         }
 
         handles.push(thread::spawn(move || {
-            let mut buf = String::with_capacity(15 * n / num_threads);
+            let mut thread_buf = Vec::with_capacity(15 * n / num_threads);
+            let mut rng = rand::thread_rng();
             (prev..prev + batch_size).for_each(|_| {
-                let mut rng = rand::thread_rng();
-                let (name, value) = generate_city(&mut rng);
-                buf += name;
-                buf.push(';');
-                buf += std::str::from_utf8(&value).unwrap();
-                buf.push('\n');
+                add_measurement(&mut thread_buf, &mut rng);
             });
-            buf
+            thread_buf
         }));
         prev += batch_size;
     }
-    let mut buf = String::with_capacity(15 * n);
-
+    let mut result = Vec::<u8>::with_capacity(15 * n);
     for t in handles {
-        buf += &t.join().unwrap()
+        result.extend(t.join().unwrap());
     }
 
     File::create(format!("measurements_{n}.txt"))
         .unwrap()
-        .write_all(buf.as_bytes())
+        .write_all(&result)
         .unwrap();
 }
 
-fn generate_city(rng: &mut impl Rng) -> (&str, Vec<u8>) {
-    let name = get_city();
-    let whole_part = rng.gen_range(0u8..99u8);
-    let decimal_part = rng.gen_range(0u8..=9u8);
-    let mut value = vec![];
+fn add_measurement(buff: & mut Vec<u8> , rng: &mut impl Rng) {
+    buff.extend(get_city().as_bytes());
+    buff.push(b';');
     let is_negative = rng.gen::<bool>();
     if is_negative {
-        value.push(b'-');
+        buff.push(b'-');
     }
+    let whole_part = rng.gen_range(0u8..99u8);
+    let decimal_part = rng.gen_range(0u8..=9u8);
     if whole_part > 9 {
-        value.push(48 + whole_part / 10);
+        buff.push(48 + whole_part / 10);
     }
-    value.push(48 + whole_part % 10);
-    value.push(b'.');
-    value.push(48 + decimal_part);
-    (name, value)
+    buff.push(48 + whole_part % 10);
+    buff.push(b'.');
+    buff.push(48 + decimal_part);
+    buff.push(b'\n');
 }
 
 fn get_city() -> &'static str {
