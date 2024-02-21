@@ -1,9 +1,14 @@
+
+
 #![allow(clippy::type_complexity)]
 #![feature(let_chains)]
+#![feature(maybe_uninit_uninit_array)]
 
 use memmap2::MmapOptions;
 use record::Record;
-use std::{io::{stdout, Write}, time::Instant};
+use std::{
+    io::{stdout, Write}, mem::MaybeUninit, sync::{Mutex, RwLock}, time::Instant
+};
 
 #[allow(dead_code)]
 mod baseline;
@@ -12,10 +17,10 @@ mod baseline;
 mod generate;
 mod record;
 
-
 /**
  * Idx and len
  */
+#[inline(always)]
 fn hash(s: &[u8], start: usize) -> (usize, usize) {
     let mut hash = 0xcbf29ce484222325u64;
     // TODO: unchecked indexing
@@ -23,23 +28,47 @@ fn hash(s: &[u8], start: usize) -> (usize, usize) {
     // TODO: check from the back instead of the front of the string
     // Saves this while loop, but makes check more complicated
     // Might work for longer string names
-    while unsafe{*s.get_unchecked(i)} != b';' {
-        hash ^= unsafe{*s.get_unchecked(i)} as u64;
+    while unsafe { *s.get_unchecked(i) } != b';' {
+        hash ^= unsafe { *s.get_unchecked(i) } as u64;
         hash = hash.wrapping_mul(0x100000001b3);
         i += 1
     }
-    let  idx = (hash % Measurements::num_buckets() as u64) as usize;
+    let idx = (hash % Measurements::num_buckets() as u64) as usize;
     (idx, i)
 }
 struct MeasurementsGeneric<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>(
-    [[Option<Record<'a>>; BUCKET_DEPTH]; NUM_BUCKETS],
+    [[Mutex<Option<Record<'a>>>; BUCKET_DEPTH]; NUM_BUCKETS],
 );
 
+macro_rules! init_mutex_array {
+    () => {
+        [
+            [std::sync::Mutex::new(None), std::sync::Mutex::new(None), std::sync::Mutex::new(None)]; 
+            10_000
+        ]
+    };
+}
 impl<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>
     MeasurementsGeneric<'a, NUM_BUCKETS, BUCKET_DEPTH>
 {
-    fn new() -> Self {
-        Self([[None; BUCKET_DEPTH]; NUM_BUCKETS])
+    const fn new() -> Self {
+ // SAFETY: The following is safe because `None` for `Option<Mutex<usize>>`
+    // is represented as all zeroes, and `write_bytes` will fill the allocated
+    // memory with zeroes. Since `Option<Mutex<usize>>` does not require any
+    // custom drop logic when set to `None`, this initialization is valid.
+    let a: [Mutex<Option<usize>>;10_000] = Default::default();
+    let mut array: [MaybeUninit<Mutex<Option <Record>>>; 10_000] = Default::default();
+
+    // Initialize the array with `None` by writing zeroes
+    unsafe {
+        std::ptr::write_bytes(array.as_mut_ptr(), 0, array.len());
+    }
+
+    // SAFETY: After initializing the array with zeroes, all elements are
+    // effectively `None`, making it safe to assume initialization.
+    let initialized_array: [Option<Mutex<usize>>; 10_000] = unsafe {
+        std::mem::transmute::<_, [Option<Mutex<usize>>; 10_000]>(array)
+    };
     }
 
     const fn total_size() -> usize {
@@ -50,6 +79,7 @@ impl<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>
         NUM_BUCKETS
     }
 
+    #[inline(always)]
     fn process_at(&mut self, hashed_idx: usize, city_name: &'a [u8], value: u16) {
         // TODO: get unchecked
         let values_for_hash = self.0.get_mut(hashed_idx).unwrap();
@@ -57,15 +87,14 @@ impl<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>
             match stored_city {
                 Some(sc) if sc.name == city_name => sc.process(value),
                 None => {
-                    * stored_city = Some(Record::new_with_initial(city_name,value)); 
-                    return;
+                    *stored_city = Some(Record::new_with_initial(city_name, value));
+                    break;
                 }
                 _ => continue,
             }
+            break;
         }
-        unreachable!("Loop should have gotten to an empty bucket");
     }
-
 }
 
 /**
@@ -77,7 +106,7 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &mut Measurements<'a>)
     // skip ';'
     let mut i = name_end + 1;
 
-    let is_negative = unsafe{*s.get_unchecked(i)} == b'-';
+    let is_negative = unsafe { *s.get_unchecked(i) } == b'-';
     if is_negative {
         // skip '-', if it exists
         i += 1
@@ -85,18 +114,18 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &mut Measurements<'a>)
 
     let mut value = 0;
     // TODO: Check loop unrolled instead of *100 , *10
-    if unsafe{*s.get_unchecked(i + 1)} == b'.' {
+    if unsafe { *s.get_unchecked(i + 1) } == b'.' {
         // handle a.b
-        value = (unsafe{*s.get_unchecked(i)} - 48) as u16 * 10;
+        value = (unsafe { *s.get_unchecked(i) } - 48) as u16 * 10;
         i += 2;
-        value += (unsafe{*s.get_unchecked(i)} - 48) as u16;
-    } else if unsafe{*s.get_unchecked(i + 2)} == b'.' {
+        value += (unsafe { *s.get_unchecked(i) } - 48) as u16;
+    } else if unsafe { *s.get_unchecked(i + 2) } == b'.' {
         // handle ab.c
-        value = (unsafe{*s.get_unchecked(i)} - 48) as u16 * 100;
+        value = (unsafe { *s.get_unchecked(i) } - 48) as u16 * 100;
         i += 1;
-        value += (unsafe{*s.get_unchecked(i)} - 48) as u16 * 10;
+        value += (unsafe { *s.get_unchecked(i) } - 48) as u16 * 10;
         i += 2;
-        value += (unsafe{*s.get_unchecked(i)} - 48) as u16;
+        value += (unsafe { *s.get_unchecked(i) } - 48) as u16;
     }
 
     if is_negative {
@@ -138,12 +167,9 @@ fn improved_parsing() {
     };
 
     measurements_flat.sort_unstable();
-    measurements_flat
-        .into_iter()
-        .flatten()
-        .for_each(|record| {
-            write_city(&mut buf, record);
-        });
+    measurements_flat.into_iter().flatten().for_each(|record| {
+        write_city(&mut buf, record);
+    });
 
     // println!("{:?}", measurements_flat.iter().rev());
 
