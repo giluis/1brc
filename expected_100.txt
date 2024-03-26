@@ -1,1 +1,0 @@
-{Kolasib=-17.6/67.4/30.6,Chicholi=-89.8/80.9/1,Fulda=-96/65.2/-33.9,Sevilla=-85.3/77.9/0.7,Konstantinovsk=-90.3/96.4/4.4,Isieke=-95.7/97.2/0.7,Freudenberg=-87.4/82.9/5.7,Bozeman=-64/96.3/11.3,Bambang=-95.4/3/-50.6,Steffisburg=-63.2/87/29,}

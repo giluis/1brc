@@ -1,20 +1,22 @@
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
-pub struct Record<'a> {
-    pub name: &'a [u8],
+pub struct Record {
+    // start, end
+    pub name: (usize, usize),
     pub min: u16,
     pub max: u16,
     pub sum: u32,
     pub count: u32,
 }
 
-impl <'a> std::cmp::Ord for Record<'a> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.name.cmp(other.name)
+impl Record {
+    pub fn cmp(&self, other: &Self, source: &[u8]) -> std::cmp::Ordering {
+        self.name(source).cmp(other.name(source))
     }
-}
 
-impl <'a> Record<'a> {
+    pub fn name<'a>(&'a self, source: &'a [u8]) -> &[u8] {
+        let (start, end) = self.name;
+        &source[start..end]
+    }
     // TODO: check inline always
     // TODO: check value as (u8,u8) instead of u16
     pub fn process(&mut self, value: u16) {
@@ -25,13 +27,13 @@ impl <'a> Record<'a> {
         self.count += 1;
     }
 
-    pub fn new_with_initial(name: &'a [u8], value: u16) -> Self {
+    pub fn new_with_initial(name: (usize, usize), value: u16) -> Self {
         Self {
             name,
             min: value,
             max: value,
             sum: value as u32,
-            count: 1
+            count: 1,
         }
     }
 }

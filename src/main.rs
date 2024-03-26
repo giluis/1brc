@@ -1,5 +1,3 @@
-
-
 #![allow(clippy::type_complexity)]
 #![feature(let_chains)]
 #![feature(maybe_uninit_uninit_array)]
@@ -7,7 +5,11 @@
 use memmap2::MmapOptions;
 use record::Record;
 use std::{
-    io::{stdout, Write}, mem::MaybeUninit, sync::{Mutex, RwLock}, time::Instant
+    io::{stdout, Write},
+    mem::MaybeUninit,
+    sync::{Arc, Mutex, RwLock},
+    thread,
+    time::Instant,
 };
 
 #[allow(dead_code)]
@@ -36,43 +38,30 @@ fn hash(s: &[u8], start: usize) -> (usize, usize) {
     let idx = (hash % Measurements::num_buckets() as u64) as usize;
     (idx, i)
 }
-struct MeasurementsGeneric<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>(
-    [[Mutex<Option<Record<'a>>>; BUCKET_DEPTH]; NUM_BUCKETS],
-);
 
-macro_rules! init_mutex_array {
-    () => {
-        [
-            [std::sync::Mutex::new(None), std::sync::Mutex::new(None), std::sync::Mutex::new(None)]; 
-            10_000
-        ]
-    };
-}
-impl<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>
-    MeasurementsGeneric<'a, NUM_BUCKETS, BUCKET_DEPTH>
-{
-    const fn new() -> Self {
- // SAFETY: The following is safe because `None` for `Option<Mutex<usize>>`
-    // is represented as all zeroes, and `write_bytes` will fill the allocated
-    // memory with zeroes. Since `Option<Mutex<usize>>` does not require any
-    // custom drop logic when set to `None`, this initialization is valid.
-    let a: [Mutex<Option<usize>>;10_000] = Default::default();
-    let mut array: [MaybeUninit<Mutex<Option <Record>>>; 10_000] = Default::default();
+#[derive(Debug)]
+struct Measurements([RwLock<Vec<Record>>; NUM_BUCKETS]);
 
-    // Initialize the array with `None` by writing zeroes
-    unsafe {
-        std::ptr::write_bytes(array.as_mut_ptr(), 0, array.len());
-    }
+unsafe impl Sync for Measurements{}
+unsafe impl Send for Measurements{}
 
-    // SAFETY: After initializing the array with zeroes, all elements are
-    // effectively `None`, making it safe to assume initialization.
-    let initialized_array: [Option<Mutex<usize>>; 10_000] = unsafe {
-        std::mem::transmute::<_, [Option<Mutex<usize>>; 10_000]>(array)
-    };
-    }
+const NUM_BUCKETS: usize = 3 * 10_000;
 
-    const fn total_size() -> usize {
-        NUM_BUCKETS * BUCKET_DEPTH
+impl Measurements {
+    fn new() -> Self {
+        // SAFETY: This is safe because MaybeUninit<T> does not require initialization.
+        let mut array: [MaybeUninit<RwLock<Vec<Record>>>; NUM_BUCKETS] =
+            unsafe { MaybeUninit::uninit().assume_init() };
+
+        // Initialize each element of the array safely.
+        for elem in &mut array[..] {
+            *elem = MaybeUninit::new(RwLock::new(vec![]));
+        }
+
+        // SAFETY: All elements of the array are initialized, so this is now safe.
+        let initialized_array: [RwLock<Vec<Record>>; NUM_BUCKETS] =
+            unsafe { std::mem::transmute(array) };
+        Self(initialized_array)
     }
 
     const fn num_buckets() -> usize {
@@ -80,28 +69,24 @@ impl<'a, const NUM_BUCKETS: usize, const BUCKET_DEPTH: usize>
     }
 
     #[inline(always)]
-    fn process_at(&mut self, hashed_idx: usize, city_name: &'a [u8], value: u16) {
+    fn process_at(&mut self, hashed_idx: usize, city_name: (usize, usize), value: u16) {
         // TODO: get unchecked
-        let values_for_hash = self.0.get_mut(hashed_idx).unwrap();
-        for stored_city in values_for_hash.iter_mut() {
-            match stored_city {
-                Some(sc) if sc.name == city_name => sc.process(value),
-                None => {
-                    *stored_city = Some(Record::new_with_initial(city_name, value));
-                    break;
-                }
-                _ => continue,
+        let mut values_for_hash = unsafe { self.0.get_unchecked(hashed_idx) }.write().unwrap();
+        for s in values_for_hash.iter_mut() {
+            if s.name == city_name {
+                s.process(value);
+                return;
             }
-            break;
         }
+        values_for_hash.push(Record::new_with_initial(city_name, value));
     }
 }
 
 /**
  * Returns shift necessary for next_starting_point
  */
-fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &mut Measurements<'a>) -> usize {
-    let (hashed_idx, name_end) = hash(s, start);
+fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: Arc<Measurements>) -> usize {
+    let (hashed_idx, name_end) = hash(&s, start);
 
     // skip ';'
     let mut i = name_end + 1;
@@ -134,41 +119,62 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &mut Measurements<'a>)
         value += 999;
     }
 
-    measurements.process_at(hashed_idx, &s[start..name_end], value);
+    measurements.process_at(hashed_idx, (start, name_end), value);
     // skip paragraph
     (i + 2) - start
 }
 
-type Measurements<'a> = MeasurementsGeneric<'a, 10_000, 3>;
 
 fn improved_parsing() {
     let timer = Instant::now();
     let source = std::fs::File::open("../measurements_1000000000.txt").unwrap();
     let file_len = source.metadata().unwrap().len() as usize;
-    let source = unsafe { MmapOptions::new().map(&source).unwrap() };
-    // let source = std::fs::read(format!("../measurements_{size}.txt")).unwrap();
-    // let file_len = source.len();
+    let source = Arc::new(unsafe { MmapOptions::new().map(&source).unwrap() });
+
     println!("Took {:?} to read file", timer.elapsed());
-    let mut start = 0;
-    // TODO: check transmute [0u64;20_000] here (Option<&str> takes as much space as &str)
-    let mut measurements = Measurements::new();
-    // let mut hasher = RandomState::new().build_hasher();
-    while start < file_len {
-        start += fast_hash(&source, start, &mut measurements);
+    const NUM_CORES: usize = 8;
+    let mut chunks = [(0, 0); NUM_CORES];
+    chunks[0] = (0, file_len / NUM_CORES);
+    for i in 1..(NUM_CORES - 1) {
+        chunks[i].0 = chunks[i - 1].1 + 1;
+        chunks[i].1 = chunks[i].0 + file_len / NUM_CORES;
     }
 
-    let mut buf = Vec::with_capacity(Measurements::total_size() * (14 + 15));
+    chunks[NUM_CORES - 1] = (chunks[NUM_CORES - 2].1 + 1, file_len);
 
-    let mut measurements_flat: [Option<Record>; Measurements::total_size()] = unsafe {
-        // Using `std::mem::transmute` to perform the conversion.
-        // Safety: This is safe because the source and target types have the same total size,
-        // and `u8` elements do not have alignment requirements or invalid states.
-        std::mem::transmute(measurements)
-    };
+    let measurements = Arc::new(Measurements::new());
 
-    measurements_flat.sort_unstable();
-    measurements_flat.into_iter().flatten().for_each(|record| {
-        write_city(&mut buf, record);
+    let mut handles = Vec::new();
+
+    for core_idx in 0..NUM_CORES {
+        let ptr = Arc::clone(&measurements);
+        let thread_source = Arc::clone(&source);
+        let handle = thread::spawn(move || unsafe {
+            let (mut start, end) = chunks[core_idx];
+            while start < end {
+
+                start += fast_hash(thread_source.as_ref(), start, ptr );
+            }
+        });
+        handles.push(handle);
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let measuerements = Arc::try_unwrap(measurements).unwrap();
+
+    let mut buf = Vec::with_capacity(NUM_BUCKETS * (14 + 15));
+    let mut measurements_flat: Vec<_> = measurements
+        .0
+        .into_iter()
+        .flat_map(|v| v.into_inner().unwrap().into_iter())
+        .collect();
+
+    measurements_flat.sort_unstable_by(|a,b| a.cmp(b, &*source));
+    measurements_flat.into_iter().for_each(|record| {
+        write_city(&mut buf, record, &*source);
     });
 
     // println!("{:?}", measurements_flat.iter().rev());
@@ -182,15 +188,18 @@ fn improved_parsing() {
 fn write_city(
     buff: &mut Vec<u8>,
     // TODO: check pass by reference
-    Record {
-        name,
+    record: Record,
+    source: &[u8], 
+) { 
+    
+    let Record {
         min,
         max,
         sum,
         count,
-    }: Record,
-) {
-    buff.extend_from_slice(name);
+        ..
+    } =record;
+    buff.extend_from_slice(record.name(source));
     buff.push(b'=');
     write_n(buff, min);
     buff.push(b'/');
