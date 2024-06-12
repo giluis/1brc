@@ -1,15 +1,14 @@
 #![allow(clippy::type_complexity)]
 #![feature(let_chains)]
 #![feature(maybe_uninit_uninit_array)]
+#![feature(array_windows)]
+#![feature(generic_const_exprs)]
+#![feature(generic_arg_infer)]
 
 use memmap2::MmapOptions;
 use record::Record;
 use std::{
-    io::{stdout, Write},
-    mem::MaybeUninit,
-    sync::{Arc, Mutex, RwLock},
-    thread,
-    time::Instant,
+    io::{stdout, Write}, mem::MaybeUninit, slice::ArrayWindows, sync::{Arc, Mutex, RwLock}, thread, time::Instant
 };
 
 #[allow(dead_code)]
@@ -39,27 +38,25 @@ fn hash(s: &[u8], start: usize) -> (usize, usize) {
     (idx, i)
 }
 
-#[derive(Debug)]
-struct Measurements([RwLock<Vec<Record>>; NUM_BUCKETS]);
-
-unsafe impl Sync for Measurements{}
-unsafe impl Send for Measurements{}
-
 const NUM_BUCKETS: usize = 3 * 10_000;
 
-impl Measurements {
+#[derive(Debug)]
+struct Measurements<'a>([RwLock<Record<'a>>; NUM_BUCKETS]);
+
+impl<'a> Measurements<'a> {
     fn new() -> Self {
+        // From ChatGPT
         // SAFETY: This is safe because MaybeUninit<T> does not require initialization.
-        let mut array: [MaybeUninit<RwLock<Vec<Record>>>; NUM_BUCKETS] =
+        let mut array: [MaybeUninit<RwLock<Record>>; NUM_BUCKETS] =
             unsafe { MaybeUninit::uninit().assume_init() };
 
         // Initialize each element of the array safely.
         for elem in &mut array[..] {
-            *elem = MaybeUninit::new(RwLock::new(vec![]));
+            *elem = MaybeUninit::new(RwLock::new(Record::empty()));
         }
 
         // SAFETY: All elements of the array are initialized, so this is now safe.
-        let initialized_array: [RwLock<Vec<Record>>; NUM_BUCKETS] =
+        let initialized_array: [RwLock<Record>; NUM_BUCKETS] =
             unsafe { std::mem::transmute(array) };
         Self(initialized_array)
     }
@@ -69,23 +66,33 @@ impl Measurements {
     }
 
     #[inline(always)]
-    fn process_at(&mut self, hashed_idx: usize, city_name: (usize, usize), value: u16) {
+    fn process_at(&self, mut hashed_idx: usize, city_name: &'a [u8], value: u16) {
         // TODO: get unchecked
-        let mut values_for_hash = unsafe { self.0.get_unchecked(hashed_idx) }.write().unwrap();
-        for s in values_for_hash.iter_mut() {
-            if s.name == city_name {
-                s.process(value);
-                return;
+        let mut r = self.0[hashed_idx].write().expect("Lock was poisoned");
+        loop {
+            match &r.name {
+                Some(n) if *n == city_name => r.process(value),
+                None => {
+                    *r = Record::new_with_initial(city_name, value);
+                    break;
+                }
+                Some(_) => {
+                    hashed_idx += 1;
+                    hashed_idx %= NUM_BUCKETS
+                }
             }
         }
-        values_for_hash.push(Record::new_with_initial(city_name, value));
+    }
+
+    fn as_sorted(self) -> [Record<'a>; NUM_BUCKETS] {
+        self.0.map(|r| RwLock::into_inner(r).unwrap())
     }
 }
 
 /**
  * Returns shift necessary for next_starting_point
  */
-fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: Arc<Measurements>) -> usize {
+fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Arc<Measurements<'a>>) -> usize {
     let (hashed_idx, name_end) = hash(&s, start);
 
     // skip ';'
@@ -119,62 +126,63 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: Arc<Measurements>) -> 
         value += 999;
     }
 
-    measurements.process_at(hashed_idx, (start, name_end), value);
+    measurements.process_at(hashed_idx, &s[start..=name_end], value);
     // skip paragraph
     (i + 2) - start
 }
 
+// fn chunks<const NUM_CHUNKS: usize>(source: &[u8]) -> ArrayWindows<'_,usize, NUM_CHUNKS>{
+//     let mut chunk_borders = [0; {NUM_CHUNKS + 1}];
+//     * chunk_borders.last_mut().unwrap() = source.len();
+//     chunk_borders[1..(NUM_CHUNKS - 1)]
+//         .iter_mut()
+//         .enumerate()
+//         .for_each(|(i, e)| {
+//             *e = i * (source.len() / NUM_CHUNKS);
+//             while source[*e] != b'\n' {
+//                 *e += 1;
+//             }
+//         });
+//      chunk_borders.array_windows()
+// }
 
 fn improved_parsing() {
     let timer = Instant::now();
-    let source = std::fs::File::open("../measurements_1000000000.txt").unwrap();
+    let source = std::fs::File::open("../measurements_100.txt").unwrap();
     let file_len = source.metadata().unwrap().len() as usize;
-    let source = Arc::new(unsafe { MmapOptions::new().map(&source).unwrap() });
+    let source = unsafe { MmapOptions::new().map(&source).unwrap() };
+    let a = &source;
+
+
 
     println!("Took {:?} to read file", timer.elapsed());
     const NUM_CORES: usize = 8;
-    let mut chunks = [(0, 0); NUM_CORES];
-    chunks[0] = (0, file_len / NUM_CORES);
-    for i in 1..(NUM_CORES - 1) {
-        chunks[i].0 = chunks[i - 1].1 + 1;
-        chunks[i].1 = chunks[i].0 + file_len / NUM_CORES;
-    }
-
-    chunks[NUM_CORES - 1] = (chunks[NUM_CORES - 2].1 + 1, file_len);
-
     let measurements = Arc::new(Measurements::new());
+    dbg!(source.len());
+    thread::scope(|s| {
+        let sref = *source;
+        for chunk in chunk_borders {
+            let ptr = Arc::clone(&measurements);
+            // let thread_source = Arc::clone(&source);
+            s.spawn(move || {
+                let [mut start, end] = chunk;
+                let end = *end;
+                while start < end {
+                    start += fast_hash(sref, start, &ptr);
+                }
+            });
 
-    let mut handles = Vec::new();
+        }
+        
+    });
 
-    for core_idx in 0..NUM_CORES {
-        let ptr = Arc::clone(&measurements);
-        let thread_source = Arc::clone(&source);
-        let handle = thread::spawn(move || unsafe {
-            let (mut start, end) = chunks[core_idx];
-            while start < end {
-
-                start += fast_hash(thread_source.as_ref(), start, ptr );
-            }
-        });
-        handles.push(handle);
-    }
-
-    for h in handles {
-        h.join().unwrap();
-    }
-
-    let measuerements = Arc::try_unwrap(measurements).unwrap();
+    let measurements = Arc::try_unwrap(measurements).unwrap().as_sorted();
 
     let mut buf = Vec::with_capacity(NUM_BUCKETS * (14 + 15));
-    let mut measurements_flat: Vec<_> = measurements
-        .0
-        .into_iter()
-        .flat_map(|v| v.into_inner().unwrap().into_iter())
-        .collect();
 
-    measurements_flat.sort_unstable_by(|a,b| a.cmp(b, &*source));
-    measurements_flat.into_iter().for_each(|record| {
-        write_city(&mut buf, record, &*source);
+    // measurements_flat.sort_unstable_by(|a,b| a.cmp(b, &*source));
+    measurements.into_iter().for_each(|record| {
+        write_city(&mut buf, record);
     });
 
     // println!("{:?}", measurements_flat.iter().rev());
@@ -189,17 +197,15 @@ fn write_city(
     buff: &mut Vec<u8>,
     // TODO: check pass by reference
     record: Record,
-    source: &[u8], 
-) { 
-    
+) {
     let Record {
         min,
         max,
         sum,
         count,
         ..
-    } =record;
-    buff.extend_from_slice(record.name(source));
+    } = record;
+    buff.extend_from_slice(record.name.unwrap());
     buff.push(b'=');
     write_n(buff, min);
     buff.push(b'/');
