@@ -4,40 +4,6 @@ use itertools::Itertools;
 
 use crate::{record::Record, Measurements};
 
-trait ToByteBuffer {
-    fn write_bytes(self, buffer: &mut Vec<u8>);
-}
-
-impl ToByteBuffer for i16 {
-    fn write_bytes(self,buffer : &mut Vec<u8>) {
-        if self < 0 {
-            buffer.push(b'-')
-        }
-
-        if self.abs() >= 10 {
-            let units = self% 10;
-        }
-        buffer.push((self/10) as u8);
-        buffer.push((self%10) as u8);
-
-        buffer.push(self % 10)
-    }
-}
-
-
-fn results_to_string<'a, I: IntoIterator<Item=Record<'a>>>(map: I) -> Vec<u8>{
-    	let mut result = vec![b'{'];
-        for Record{name, min, max, sum, count} in map {
-            result.extend(name.unwrap());
-            result.push(b'=');
-            result.push(min);
-            result.push(max);
-            result.push(sum)
-
-        }
-        result
-}
-
 fn baseline(data_points: &[u8]) -> String {
     let mut hashmap = HashMap::<&[u8], (f32, f32, f32, usize)>::new();
     let mut i = 0;
@@ -88,7 +54,7 @@ fn baseline(data_points: &[u8]) -> String {
 }
 
 
-pub fn baseline(size: usize) {
+pub fn baseline1(size: usize) {
     let a = std::fs::read_to_string(format!("../measurements_{size}.txt")).unwrap();
     let mut measurements = std::collections::HashMap::new();
     for l in a.lines() {

@@ -1,14 +1,28 @@
-#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Ord, Eq, PartialEq, PartialOrd)]
 pub struct Record<'a> {
     // start, end
     pub name: Option<&'a [u8]>,
-    pub min: u16,
-    pub max: u16,
-    pub sum: u32,
-    pub count: u32,
+    pub min: i16,
+    pub max: i16,
+    pub sum: i64,
+    pub count: i64,
 }
 
-impl <'a> Record<'a> {
+impl<'a> std::fmt::Display for Record<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = format!(
+            "{{name: {:?}, min: {}, max: {}, sum: {}, count: {}}}",
+            self.name.map(|s| std::str::from_utf8(s).unwrap()),
+            self.min,
+            self.max,
+            self.sum,
+            self.count
+        );
+        write!(f, "{s}")
+    }
+}
+
+impl<'a> Record<'a> {
     pub fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.name.cmp(&other.name)
     }
@@ -22,33 +36,31 @@ impl <'a> Record<'a> {
     // }
     // TODO: check inline always
     // TODO: check value as (u8,u8) instead of u16
-    pub fn process(&mut self, value: u16) {
+    pub fn process(&mut self, value: i16) {
         // TODO: unchecked operations
         self.min = self.min.min(value);
         self.max = self.max.max(value);
-        self.sum += value as u32;
+        self.sum += value as i64;
         self.count += 1;
     }
 
-    pub fn new_with_initial(name: &'a [u8], value: u16) -> Self {
+    pub fn new_with_initial(name: &'a [u8], value: i16) -> Self {
         Self {
             name: Some(name),
             min: value,
             max: value,
-            sum: value as u32,
+            sum: value as i64,
             count: 1,
         }
     }
 
-    pub fn empty() -> Self{
+    pub fn empty() -> Self {
         Self {
             name: None,
-            min: u16::MAX,
-            max: u16::MIN,
-            sum: 0 as u32,
-            count:0,
+            min: i16::MAX,
+            max: i16::MIN,
+            sum: 0,
+            count: 0,
         }
-
     }
-
 }

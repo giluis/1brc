@@ -1,3 +1,4 @@
+#![feature(ascii_char)]
 #![allow(clippy::type_complexity)]
 #![feature(let_chains)]
 #![feature(maybe_uninit_uninit_array)]
@@ -5,10 +6,18 @@
 #![feature(generic_const_exprs)]
 #![feature(generic_arg_infer)]
 
+use itertools::Chunk;
+use lazy_static::lazy_static;
 use memmap2::MmapOptions;
+use rayon::{result, str::CharIndices};
 use record::Record;
 use std::{
-    io::{stdout, Write}, mem::MaybeUninit, slice::ArrayWindows, sync::{Arc, Mutex, RwLock}, thread, time::Instant
+    io::{stdout, Write},
+    mem::MaybeUninit,
+    slice::ArrayWindows,
+    sync::{Arc, Mutex, RwLock},
+    thread::{self, current},
+    time::Instant,
 };
 
 #[allow(dead_code)]
@@ -19,29 +28,47 @@ mod generate;
 mod record;
 
 /**
- * Idx and len
+ * Returns (hashed_idx, len), 
+ * - hashed_idx is the predicted location of the city starting at `start` in s
+ * - len is the length of this city name
+ * 
+ *
  */
 #[inline(always)]
 fn hash(s: &[u8], start: usize) -> (usize, usize) {
     let mut hash = 0xcbf29ce484222325u64;
     // TODO: unchecked indexing
-    let mut i = start;
+    let mut city_len = start;
     // TODO: check from the back instead of the front of the string
     // Saves this while loop, but makes check more complicated
     // Might work for longer string names
-    while unsafe { *s.get_unchecked(i) } != b';' {
-        hash ^= unsafe { *s.get_unchecked(i) } as u64;
+    while s[city_len]  != b';' {
+        hash ^=  s[city_len]  as u64;
         hash = hash.wrapping_mul(0x100000001b3);
-        i += 1
+        city_len += 1
     }
-    let idx = (hash % Measurements::num_buckets() as u64) as usize;
-    (idx, i)
+    let hashed_idx = (hash % Measurements::num_buckets() as u64) as usize;
+    // set i before semi_colon
+    (hashed_idx, city_len - 1)
 }
 
-const NUM_BUCKETS: usize = 3 * 10_000;
+const NUM_BUCKETS: usize = 10000;
 
-#[derive(Debug)]
 struct Measurements<'a>([RwLock<Record<'a>>; NUM_BUCKETS]);
+
+struct MeasurementsIterator {idx: usize}
+
+
+impl <'a> std::fmt::Debug for Measurements<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut result = "{".to_owned();
+        for r in self.0.iter().filter(|r|r.read().unwrap().name.is_some()) {
+            result += &r.read().unwrap().to_string();
+        }
+        result += "}";
+        write!(f, "{result}")
+    }
+}
 
 impl<'a> Measurements<'a> {
     fn new() -> Self {
@@ -66,39 +93,48 @@ impl<'a> Measurements<'a> {
     }
 
     #[inline(always)]
-    fn process_at(&self, mut hashed_idx: usize, city_name: &'a [u8], value: u16) {
+    fn process_at(&self, mut hashed_idx: usize, city_name: &'a [u8], value: i16) {
         // TODO: get unchecked
-        let mut r = self.0[hashed_idx].write().expect("Lock was poisoned");
         loop {
-            match &r.name {
-                Some(n) if *n == city_name => r.process(value),
-                None => {
-                    *r = Record::new_with_initial(city_name, value);
-                    break;
+            let mut bucket = self.0[hashed_idx].write().expect("Lock was poisoned");
+            match &bucket.name {
+                Some(n) if *n == city_name => {
+                    println!("Idx {hashed_idx} contains {:?}... processing", std::str::from_utf8(city_name).unwrap());
+                    bucket.process(value);
+                    return;
                 }
-                Some(_) => {
+                Some(other) => {
+                    println!("Idx {hashed_idx} is filled with {:?}, cannot input {:?}", std::str::from_utf8(other).unwrap(),std::str::from_utf8(city_name).unwrap());
                     hashed_idx += 1;
                     hashed_idx %= NUM_BUCKETS
+                }
+                None => {
+                    println!("Idx {hashed_idx} is empty, inputting {:?}", std::str::from_utf8(city_name).unwrap());
+                    *bucket = Record::new_with_initial(city_name, value);
+                    return;
                 }
             }
         }
     }
 
-    fn as_sorted(self) -> [Record<'a>; NUM_BUCKETS] {
-        self.0.map(|r| RwLock::into_inner(r).unwrap())
+    fn as_sorted(self) -> Vec<Record<'a>> {
+        let mut r: Vec<_> = self.0.into_iter().map(|r|RwLock::into_inner(r).unwrap()).filter(|r|r.name.is_some()).collect();
+        // TODO: Check sort unstable for difference
+        r.sort(); 
+        r
     }
 }
 
 /**
  * Returns shift necessary for next_starting_point
  */
-fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Arc<Measurements<'a>>) -> usize {
-    let (hashed_idx, name_end) = hash(&s, start);
+fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Measurements<'a>) -> usize {
+    let (hashed_idx, name_end) = hash(s, start);
 
     // skip ';'
-    let mut i = name_end + 1;
+    let mut i = name_end + 2;
 
-    let is_negative = unsafe { *s.get_unchecked(i) } == b'-';
+    let is_negative = s[i] == b'-';
     if is_negative {
         // skip '-', if it exists
         i += 1
@@ -106,29 +142,27 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Arc<Measurements<'a>>
 
     let mut value = 0;
     // TODO: Check loop unrolled instead of *100 , *10
-    if unsafe { *s.get_unchecked(i + 1) } == b'.' {
-        // handle a.b
-        value = (unsafe { *s.get_unchecked(i) } - 48) as u16 * 10;
+    if s[i + 1] == b'.' {
+        // handle X.Y
+        value = (s[i] - 48) as i16 * 10;
         i += 2;
-        value += (unsafe { *s.get_unchecked(i) } - 48) as u16;
-    } else if unsafe { *s.get_unchecked(i + 2) } == b'.' {
-        // handle ab.c
-        value = (unsafe { *s.get_unchecked(i) } - 48) as u16 * 100;
+        value += (s[i] - 48) as i16;
+    } else if s[i + 2] == b'.' {
+        // handle XY.Z
+        value = (s[i] - 48) as i16 * 100;
         i += 1;
-        value += (unsafe { *s.get_unchecked(i) } - 48) as u16 * 10;
+        value += (s[i] - 48) as i16 * 10;
         i += 2;
-        value += (unsafe { *s.get_unchecked(i) } - 48) as u16;
+        value += (s[i] - 48) as i16;
     }
 
     if is_negative {
-        value = 999 - value;
-    } else {
-        value += 999;
+        value *= -1;
     }
 
     measurements.process_at(hashed_idx, &s[start..=name_end], value);
     // skip paragraph
-    (i + 2) - start
+    i + 2 
 }
 
 // fn chunks<const NUM_CHUNKS: usize>(source: &[u8]) -> ArrayWindows<'_,usize, NUM_CHUNKS>{
@@ -146,54 +180,52 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Arc<Measurements<'a>>
 //      chunk_borders.array_windows()
 // }
 
-fn improved_parsing() {
-    let timer = Instant::now();
-    let source = std::fs::File::open("../measurements_100.txt").unwrap();
+fn improved_parsing(file_name: &str) -> Vec<u8>{
+    const NUM_CORES: usize = 1;
+    let measurements = Measurements::new();
+    let source = std::fs::File::open(file_name).unwrap();
     let file_len = source.metadata().unwrap().len() as usize;
     let source = unsafe { MmapOptions::new().map(&source).unwrap() };
-    let a = &source;
 
-
-
-    println!("Took {:?} to read file", timer.elapsed());
-    const NUM_CORES: usize = 8;
-    let measurements = Arc::new(Measurements::new());
-    dbg!(source.len());
+    let chunk_size = file_len / NUM_CORES;
+    let mut chunk_borders = [(0, 0); NUM_CORES];
+    chunk_borders
+        .iter_mut()
+        .enumerate()
+        .for_each(|(i, (a, b))| {
+            *a = i * chunk_size;
+            *b = (i + 1) * chunk_size;
+        });
+    chunk_borders[NUM_CORES - 1].1 = file_len;
     thread::scope(|s| {
-        let sref = *source;
-        for chunk in chunk_borders {
-            let ptr = Arc::clone(&measurements);
-            // let thread_source = Arc::clone(&source);
-            s.spawn(move || {
-                let [mut start, end] = chunk;
-                let end = *end;
+        // let sourceref: &[u8] = &source ;
+        for chunk in chunk_borders.iter() {
+            s.spawn(|| {
+                let mut start = chunk.0;
+                let end = chunk.1;
                 while start < end {
-                    start += fast_hash(sref, start, &ptr);
+                    start = fast_hash(&source, start, &measurements);
                 }
             });
-
         }
-        
     });
 
-    let measurements = Arc::try_unwrap(measurements).unwrap().as_sorted();
+    // println!("{:?}", measurements);
+    // 15 is an estimate of the averge size of
+    let mut result_buffer = Vec::with_capacity(NUM_BUCKETS * 15);
+    result_buffer.push(b'{');
 
-    let mut buf = Vec::with_capacity(NUM_BUCKETS * (14 + 15));
-
-    // measurements_flat.sort_unstable_by(|a,b| a.cmp(b, &*source));
-    measurements.into_iter().for_each(|record| {
-        write_city(&mut buf, record);
-    });
-
-    // println!("{:?}", measurements_flat.iter().rev());
-
-    let len = buf.len();
-    buf[len - 1] = b'}';
-    stdout().lock().write_all(&buf).unwrap();
-    println!("\nTook {:?} to process", timer.elapsed());
+    // TODO: check pass by reference
+    measurements.as_sorted().into_iter().for_each(|r|write_record(&mut result_buffer, r));
+    // remove last ','
+    result_buffer.pop(); 
+    result_buffer.push(b'}');
+    println!("buffer len: {} ", result_buffer.len());
+    result_buffer
+    // println!("\nTook {:?} to process", timer.elapsed());
 }
 
-fn write_city(
+fn write_record(
     buff: &mut Vec<u8>,
     // TODO: check pass by reference
     record: Record,
@@ -215,95 +247,119 @@ fn write_city(
     buff.push(b',')
 }
 
-fn mean(sum: u32, count: u32) -> u16 {
-    let mean = (sum / count) as u16;
-    if sum % count == 0 {
-        mean
-    } else if mean > 999 {
-        mean + 1
-    } else {
-        mean
-    }
+fn mean(sum: i64, count: i64) -> i16 {
+    (sum / count) as i16
 }
 
-fn write_n(buff: &mut Vec<u8>, value: u16) {
-    // TODO: check mutating value instead of assigning to real value
-    let mut real_value = if value < 999 {
-        // TODO: check subtraction here
-        buff.push(b'-');
-        999 - value
-    } else {
-        value - 999
-    };
-
-    if real_value >= 100 {
-        buff.push(48 + (real_value / 100) as u8);
-        real_value %= 100;
+fn write_n(buffer: &mut Vec<u8>, value: i16) {
+    if value < 0 {
+        buffer.push(b'-')
     }
 
-    buff.push(48 + (real_value / 10) as u8);
-    buff.push(b'.');
-    buff.push(48 + (real_value % 10) as u8);
+    let value = value.abs();
+
+    if value >= 10 {
+        buffer.push((value / 100) as u8 + b'0');
+    }
+    buffer.push(((value / 10) % 10) as u8 + b'0');
+    buffer.push(b'.');
+    buffer.push((value % 10) as u8 + b'0');
 }
 
 fn main() {
-    improved_parsing();
+    // TODO: check if previous allocation saves a lot of time
+    let mut result_buffer = improved_parsing("../inputs/measurements_100.txt");
+    println!("printing {:?}", result_buffer);
+
+    stdout().lock().write_all(&result_buffer).unwrap();
+    println!("{}", size_of::<RwLock<Record<'static>>>());
+    // let source = std::fs::read("../inputs/measurements_3.txt").unwrap();
+    // let end = source.len();
+    // let mut start = 0;
+    // let measurements = Measurements::new();
+    // while start < end {
+    //     let inc = fast_hash(&source, start, &measurements);
+    //     println!("{inc}, {}", std::str::from_utf8(&source[start..start + inc -1]).unwrap());
+    //     start += inc;
+    // }
+
     // println!("File has been generated");
-    // let source = std::fs::read_to_string("./measurements_1000000000.txt").unwrap();
     // let a: AHashSet<&str> = source.lines().map(|l|l.split_once(';').unwrap().0).collect();
     // println!("Num cities {}", a.len());
+}
+
+trait DropAfter: num::Float {
+    fn drop_decimals_after(self, decimal_places: u32) -> Self;
+}
+
+impl DropAfter for f32 {
+    fn drop_decimals_after(self, decimal_places: u32) -> Self {
+        let ten_power = 10_u32.pow(decimal_places) as f32;
+        (self * ten_power).round() / ten_power
+    }
 }
 
 #[cfg(test)]
 mod tests {
 
-    use crate::{mean, write_n};
+    use crate::{improved_parsing, mean, record::Record, write_n, write_record, DropAfter};
+
+    #[test]
+    fn measurements_101() {
+        let mut result = vec![];
+        improved_parsing("../inputs/measurements_100.txt", &mut result);
+        let expected = std::fs::read("../outputs/results_100.txt").unwrap();
+        assert_eq!(expected, result.as_slice())
+    }
+
 
     #[test]
     fn write_n_test() {
-        let mut i = -999;
-        while i <= 999 {
-            // println!("{i}");
-            let mut buff = vec![];
-            write_n(&mut buff, (i + 999) as u16);
-            let result: f32 = String::from_utf8(buff).unwrap().parse().unwrap();
-            assert_eq!((result * 10.0).round() / 10.0, (i as f32).round() / 10.0);
-            i += 1;
+        let mut buff = vec![];
+        let inputs = [-999, 999, 0, 1, 10, 100, -1, -10, -100, -99, 99];
+
+        for i in inputs {
+            buff.clear();
+            write_n(&mut buff, i);
+            let result: f32 = match std::str::from_utf8(&buff) {
+                Ok(result) => result.parse().unwrap(),
+                Err(_) => {
+                    todo!()
+                }
+            };
+            //
+            assert_eq!(result.drop_decimals_after(1), (i as f32) / 10.0);
         }
     }
 
     #[test]
     fn write_city_test() {
-        // let city_name = "Porto";
-        // let record = Record {
-        //     max: (16) + 999,          // 1015
-        //     min: (-964 + 999) as u16, // 35
-        //     count: 3,
-        //     sum: 1015 + 35 + 88,
-        // };
+        let inputs = [(
+            Record {
+                name: Some("Porto".as_bytes()),
+                max: 912,
+                min: -881,
+                count: 70,
+                sum: 70 * 123,
+            },
+            format!(
+                "Porto=-88.1/91.2/{},",
+                ((mean(70 * 123, 70) as f32) / 10.0).drop_decimals_after(1)
+            ),
+        )];
 
-        // let expected = format!("{city_name}={}/{}/{},", record.min, record.max, 62.0);
-        let mut i = -999;
-        while i <= 999 {
-            // println!("{i}");
-            let mut buff = vec![];
-            write_n(&mut buff, (i + 999) as u16);
-            let result: f32 = String::from_utf8(buff).unwrap().parse().unwrap();
-            assert_eq!((result * 10.0).round() / 10.0, (i as f32).round() / 10.0);
-            i += 1;
+        let mut buff = vec![];
+        for (input, expected) in inputs {
+            buff.clear();
+            write_record(&mut buff, input);
+            assert_eq!(expected, std::str::from_utf8(buff.as_slice()).unwrap());
         }
     }
 
     #[test]
     fn test_mean() {
-        // let inputs_expected = [([1035, 998, 1001], 13 + 999)];
-
-        // let mean = mean(1035 + 998 + 1001, 3);
-        // assert_eq!(mean, 13 + 999);
-
-        let mean = mean(999 + 1338 + 999, 3);
-        assert_eq!(mean, 339)
+        #[allow(clippy::identity_op)]
+        let mean = mean(999 - 999 + 10 - 15, 4);
+        assert_eq!(mean, -1)
     }
 }
-
-/* Generation */
