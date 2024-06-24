@@ -6,17 +6,13 @@
 #![feature(generic_const_exprs)]
 #![feature(generic_arg_infer)]
 
-use itertools::Chunk;
-use lazy_static::lazy_static;
 use memmap2::MmapOptions;
-use rayon::{result, str::CharIndices};
 use record::Record;
 use std::{
     io::{stdout, Write},
     mem::MaybeUninit,
-    slice::ArrayWindows,
-    sync::{Arc, Mutex, RwLock},
-    thread::{self, current},
+    sync::RwLock,
+    thread,
     time::Instant,
 };
 
@@ -28,41 +24,42 @@ mod generate;
 mod record;
 
 /**
- * Returns (hashed_idx, len), 
+ * Returns (hashed_idx, len),
  * - hashed_idx is the predicted location of the city starting at `start` in s
  * - len is the length of this city name
- * 
+ *
  *
  */
 #[inline(always)]
 fn hash(s: &[u8], start: usize) -> (usize, usize) {
     let mut hash = 0xcbf29ce484222325u64;
     // TODO: unchecked indexing
-    let mut city_len = start;
+    let mut city_name_end = start;
     // TODO: check from the back instead of the front of the string
     // Saves this while loop, but makes check more complicated
     // Might work for longer string names
-    while s[city_len]  != b';' {
-        hash ^=  s[city_len]  as u64;
+    while s[city_name_end] != b';' {
+        hash ^= s[city_name_end] as u64;
         hash = hash.wrapping_mul(0x100000001b3);
-        city_len += 1
+        city_name_end += 1
     }
     let hashed_idx = (hash % Measurements::num_buckets() as u64) as usize;
     // set i before semi_colon
-    (hashed_idx, city_len - 1)
+    (hashed_idx, city_name_end - 1)
 }
 
-const NUM_BUCKETS: usize = 10000;
+const NUM_BUCKETS: usize = 22000;
 
-struct Measurements<'a>([RwLock<Record<'a>>; NUM_BUCKETS]);
+struct Measurements<'a>(Vec<RwLock<Record<'a>>>);
 
-struct MeasurementsIterator {idx: usize}
+struct MeasurementsIterator {
+    idx: usize,
+}
 
-
-impl <'a> std::fmt::Debug for Measurements<'a> {
+impl<'a> std::fmt::Debug for Measurements<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut result = "{".to_owned();
-        for r in self.0.iter().filter(|r|r.read().unwrap().name.is_some()) {
+        for r in self.0.iter().filter(|r| r.read().unwrap().name.is_some()) {
             result += &r.read().unwrap().to_string();
         }
         result += "}";
@@ -74,18 +71,22 @@ impl<'a> Measurements<'a> {
     fn new() -> Self {
         // From ChatGPT
         // SAFETY: This is safe because MaybeUninit<T> does not require initialization.
-        let mut array: [MaybeUninit<RwLock<Record>>; NUM_BUCKETS] =
-            unsafe { MaybeUninit::uninit().assume_init() };
+        // let mut array: [MaybeUninit<RwLock<Record>>; NUM_BUCKETS] =
+        //     unsafe { MaybeUninit::uninit().assume_init() };
 
-        // Initialize each element of the array safely.
-        for elem in &mut array[..] {
-            *elem = MaybeUninit::new(RwLock::new(Record::empty()));
-        }
+        // // Initialize each element of the array safely.
+        // for elem in &mut array[..] {
+        //     *elem = MaybeUninit::new(RwLock::new(Record::empty()));
+        // }
 
-        // SAFETY: All elements of the array are initialized, so this is now safe.
-        let initialized_array: [RwLock<Record>; NUM_BUCKETS] =
-            unsafe { std::mem::transmute(array) };
-        Self(initialized_array)
+        // // SAFETY: All elements of the array are initialized, so this is now safe.
+        // let initialized_array: [RwLock<Record>; NUM_BUCKETS] =
+        //     unsafe { std::mem::transmute(array) };
+        Self(
+            (0..NUM_BUCKETS)
+                .map(|_| RwLock::new(Record::empty()))
+                .collect(),
+        )
     }
 
     const fn num_buckets() -> usize {
@@ -99,17 +100,17 @@ impl<'a> Measurements<'a> {
             let mut bucket = self.0[hashed_idx].write().expect("Lock was poisoned");
             match &bucket.name {
                 Some(n) if *n == city_name => {
-                    println!("Idx {hashed_idx} contains {:?}... processing", std::str::from_utf8(city_name).unwrap());
+                    // println!("Idx {hashed_idx} contains {:?}... processing", std::str::from_utf8(city_name).unwrap());
                     bucket.process(value);
                     return;
                 }
-                Some(other) => {
-                    println!("Idx {hashed_idx} is filled with {:?}, cannot input {:?}", std::str::from_utf8(other).unwrap(),std::str::from_utf8(city_name).unwrap());
+                Some(_other) => {
+                    // println!("Idx {hashed_idx} is filled with {:?}, cannot input {:?}", std::str::from_utf8(other).unwrap(),std::str::from_utf8(city_name).unwrap());
                     hashed_idx += 1;
                     hashed_idx %= NUM_BUCKETS
                 }
                 None => {
-                    println!("Idx {hashed_idx} is empty, inputting {:?}", std::str::from_utf8(city_name).unwrap());
+                    // println!("Idx {hashed_idx} is empty, inputting {:?}", std::str::from_utf8(city_name).unwrap());
                     *bucket = Record::new_with_initial(city_name, value);
                     return;
                 }
@@ -117,10 +118,15 @@ impl<'a> Measurements<'a> {
         }
     }
 
-    fn as_sorted(self) -> Vec<Record<'a>> {
-        let mut r: Vec<_> = self.0.into_iter().map(|r|RwLock::into_inner(r).unwrap()).filter(|r|r.name.is_some()).collect();
+    fn to_sorted(self) -> Vec<Record<'a>> {
+        let mut r: Vec<_> = self
+            .0
+            .into_iter()
+            .map(|r| RwLock::into_inner(r).unwrap())
+            .filter(|r| r.name.is_some())
+            .collect();
         // TODO: Check sort unstable for difference
-        r.sort(); 
+        r.sort();
         r
     }
 }
@@ -162,7 +168,7 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Measurements<'a>) -> 
 
     measurements.process_at(hashed_idx, &s[start..=name_end], value);
     // skip paragraph
-    i + 2 
+    i + 2
 }
 
 // fn chunks<const NUM_CHUNKS: usize>(source: &[u8]) -> ArrayWindows<'_,usize, NUM_CHUNKS>{
@@ -180,8 +186,8 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Measurements<'a>) -> 
 //      chunk_borders.array_windows()
 // }
 
-fn improved_parsing(file_name: &str) -> Vec<u8>{
-    const NUM_CORES: usize = 1;
+fn improved_parsing(file_name: &str) -> Vec<u8> {
+    const NUM_CORES: usize = 8;
     let measurements = Measurements::new();
     let source = std::fs::File::open(file_name).unwrap();
     let file_len = source.metadata().unwrap().len() as usize;
@@ -197,6 +203,7 @@ fn improved_parsing(file_name: &str) -> Vec<u8>{
             *b = (i + 1) * chunk_size;
         });
     chunk_borders[NUM_CORES - 1].1 = file_len;
+    println!("chunk_borders: {:?}", chunk_borders);
     thread::scope(|s| {
         // let sourceref: &[u8] = &source ;
         for chunk in chunk_borders.iter() {
@@ -216,11 +223,14 @@ fn improved_parsing(file_name: &str) -> Vec<u8>{
     result_buffer.push(b'{');
 
     // TODO: check pass by reference
-    measurements.as_sorted().into_iter().for_each(|r|write_record(&mut result_buffer, r));
+    measurements
+        .to_sorted()
+        .into_iter()
+        .for_each(|r| write_record(&mut result_buffer, r));
     // remove last ','
-    result_buffer.pop(); 
+    result_buffer.pop();
     result_buffer.push(b'}');
-    println!("buffer len: {} ", result_buffer.len());
+    // println!("buffer len: {} ", result_buffer.len());
     result_buffer
     // println!("\nTook {:?} to process", timer.elapsed());
 }
@@ -266,13 +276,44 @@ fn write_n(buffer: &mut Vec<u8>, value: i16) {
     buffer.push((value % 10) as u8 + b'0');
 }
 
-fn main() {
-    // TODO: check if previous allocation saves a lot of time
-    let mut result_buffer = improved_parsing("../inputs/measurements_100.txt");
-    println!("printing {:?}", result_buffer);
+fn generate_results() {
+    [10, 100, 10000, 1000000, 1000000000].iter().for_each(|n| {
+        let builder = thread::Builder::new()
+            .name("master_thread".to_string())
+            .stack_size(size_of::<Measurements>() * 4); // Set the stack size to 4 MB
 
-    stdout().lock().write_all(&result_buffer).unwrap();
-    println!("{}", size_of::<RwLock<Record<'static>>>());
+        let input_name = format!("../inputs/measurements_{n}.txt");
+        let output_name = format!("../outputs/result_{n}.txt");
+
+        let timer = Instant::now();
+        let handle = builder.spawn(move || improved_parsing(&input_name));
+        let contents = handle.unwrap().join().unwrap();
+        std::fs::write(output_name, contents).unwrap();
+        println!(
+            "Took {} to parse {n} measurements",
+            timer.elapsed().as_millis()
+        );
+    });
+}
+
+fn main() {
+    // generate_results();
+    const N: usize = 1_000_000_000;
+    let builder = thread::Builder::new()
+        .name("master_thread".to_string())
+        .stack_size(size_of::<Measurements>() * 4); // Set the stack size to 4 MB
+
+    let input_name = format!("../inputs/measurements_{N}.txt");
+    let expected_name = format!("../outputs/result_{N}.txt");
+    let expected = std::fs::read(expected_name).unwrap();
+    let timer = Instant::now();
+    let handle = builder.spawn(move || improved_parsing(&input_name));
+    let result = handle.unwrap().join().unwrap();
+    assert_eq!(expected, result.as_slice());
+    println!(
+        "Took {} to parse {N} measurements",
+        timer.elapsed().as_millis()
+    );
     // let source = std::fs::read("../inputs/measurements_3.txt").unwrap();
     // let end = source.len();
     // let mut start = 0;
@@ -306,12 +347,10 @@ mod tests {
 
     #[test]
     fn measurements_101() {
-        let mut result = vec![];
-        improved_parsing("../inputs/measurements_100.txt", &mut result);
+        let result = improved_parsing("../inputs/measurements_100.txt");
         let expected = std::fs::read("../outputs/results_100.txt").unwrap();
         assert_eq!(expected, result.as_slice())
     }
-
 
     #[test]
     fn write_n_test() {

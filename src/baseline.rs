@@ -2,7 +2,6 @@ use std::{collections::HashMap, io::{stdout, Write}};
 
 use itertools::Itertools;
 
-use crate::{record::Record, Measurements};
 
 fn baseline(data_points: &[u8]) -> String {
     let mut hashmap = HashMap::<&[u8], (f32, f32, f32, usize)>::new();
