@@ -63,4 +63,11 @@ impl<'a> Record<'a> {
             count: 0,
         }
     }
+
+    pub fn merge(&mut self, other :& Self) {
+        self.max = self.max.max(other.max);
+        self.min = self.min.min(other.min);
+        self.sum += other.sum;
+        self.count += other.count;
+    }
 }

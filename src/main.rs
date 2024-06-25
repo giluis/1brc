@@ -23,16 +23,17 @@ mod baseline;
 mod generate;
 mod record;
 
+const INITIAL_HASH: u64 = 0xcbf29ce484222325u64;
+const HASH_WRAP_MUL: u64 = 0x100000001b3;
+
 /**
  * Returns (hashed_idx, len),
  * - hashed_idx is the predicted location of the city starting at `start` in s
  * - len is the length of this city name
- *
- *
  */
 #[inline(always)]
-fn hash(s: &[u8], start: usize) -> (usize, usize) {
-    let mut hash = 0xcbf29ce484222325u64;
+fn hash_find(s: &[u8], start: usize) -> (usize, usize) {
+    let mut hash = INITIAL_HASH;
     // TODO: unchecked indexing
     let mut city_name_end = start;
     // TODO: check from the back instead of the front of the string
@@ -40,7 +41,7 @@ fn hash(s: &[u8], start: usize) -> (usize, usize) {
     // Might work for longer string names
     while s[city_name_end] != b';' {
         hash ^= s[city_name_end] as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(HASH_WRAP_MUL);
         city_name_end += 1
     }
     let hashed_idx = (hash % Measurements::num_buckets() as u64) as usize;
@@ -50,7 +51,8 @@ fn hash(s: &[u8], start: usize) -> (usize, usize) {
 
 const NUM_BUCKETS: usize = 22000;
 
-struct Measurements<'a>(Vec<RwLock<Record<'a>>>);
+#[derive(Clone)]
+struct Measurements<'a>(Vec<Record<'a>>);
 
 struct MeasurementsIterator {
     idx: usize,
@@ -59,8 +61,8 @@ struct MeasurementsIterator {
 impl<'a> std::fmt::Debug for Measurements<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut result = "{".to_owned();
-        for r in self.0.iter().filter(|r| r.read().unwrap().name.is_some()) {
-            result += &r.read().unwrap().to_string();
+        for r in self.0.iter().filter(|r| r.name.is_some()) {
+            result += &r.to_string();
         }
         result += "}";
         write!(f, "{result}")
@@ -82,11 +84,7 @@ impl<'a> Measurements<'a> {
         // // SAFETY: All elements of the array are initialized, so this is now safe.
         // let initialized_array: [RwLock<Record>; NUM_BUCKETS] =
         //     unsafe { std::mem::transmute(array) };
-        Self(
-            (0..NUM_BUCKETS)
-                .map(|_| RwLock::new(Record::empty()))
-                .collect(),
-        )
+        Self((0..NUM_BUCKETS).map(|_| Record::empty()).collect())
     }
 
     const fn num_buckets() -> usize {
@@ -94,15 +92,15 @@ impl<'a> Measurements<'a> {
     }
 
     #[inline(always)]
-    fn process_at(&self, mut hashed_idx: usize, city_name: &'a [u8], value: i16) {
+    fn process_at(&mut self, mut hashed_idx: usize, city_name: &'a [u8], value: i16) {
         // TODO: get unchecked
         loop {
-            let mut bucket = self.0[hashed_idx].write().expect("Lock was poisoned");
+            let bucket = &mut self.0[hashed_idx];
+
             match &bucket.name {
                 Some(n) if *n == city_name => {
                     // println!("Idx {hashed_idx} contains {:?}... processing", std::str::from_utf8(city_name).unwrap());
-                    bucket.process(value);
-                    return;
+                    break;
                 }
                 Some(_other) => {
                     // println!("Idx {hashed_idx} is filled with {:?}, cannot input {:?}", std::str::from_utf8(other).unwrap(),std::str::from_utf8(city_name).unwrap());
@@ -115,27 +113,70 @@ impl<'a> Measurements<'a> {
                     return;
                 }
             }
+            self.0[hashed_idx].process(value);
         }
     }
 
     fn to_sorted(self) -> Vec<Record<'a>> {
-        let mut r: Vec<_> = self
-            .0
-            .into_iter()
-            .map(|r| RwLock::into_inner(r).unwrap())
-            .filter(|r| r.name.is_some())
-            .collect();
+        let mut r: Vec<_> = self.0.into_iter().filter(|r| r.name.is_some()).collect();
         // TODO: Check sort unstable for difference
         r.sort();
         r
+    }
+
+    fn merge(& mut self, mut other: Measurements<'a>) {
+        for e in other.0.iter_mut().filter(|e|e.name.is_some()) {
+            // Temporarily take out the name to avoid borrow issues
+            self.find_and_merge( e) 
+        }
+    }
+
+    fn find_and_merge<'b:'a>(& mut self,  other:&mut  Record<'b>) {
+        let mut hash = INITIAL_HASH;
+        // TODO: unchecked indexing
+        // TODO: check from the back instead of the front of the string
+        // Saves this while loop, but makes check more complicated
+        // Might work for longer string names
+        let name = & other.name.unwrap();
+        if other.name.is_none() {
+            return
+        }
+
+        for c in other.name.unwrap() {
+            hash ^= *c as u64;
+            hash = hash.wrapping_mul(HASH_WRAP_MUL);
+        }
+
+        let mut hashed_idx = (hash % Measurements::num_buckets() as u64) as usize;
+        // set i before semi_colon
+        loop {
+            let bucket = &self.0[hashed_idx];
+
+            match &bucket.name {
+                Some(n) if n == name => {
+                    // println!("Idx {hashed_idx} contains {:?}... processing", std::str::from_utf8(city_name).unwrap());
+                    break;
+                }
+                Some(_other) => {
+                    // println!("Idx {hashed_idx} is filled with {:?}, cannot input {:?}", std::str::from_utf8(other).unwrap(),std::str::from_utf8(city_name).unwrap());
+                    hashed_idx += 1;
+                    hashed_idx %= NUM_BUCKETS
+                }
+                None => {
+                    // println!("Idx {hashed_idx} is empty, inputting {:?}", std::str::from_utf8(city_name).unwrap());
+                    return;
+                }
+            }
+        }
+        self.0[hashed_idx].merge(other);
     }
 }
 
 /**
  * Returns shift necessary for next_starting_point
  */
-fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Measurements<'a>) -> usize {
-    let (hashed_idx, name_end) = hash(s, start);
+fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &mut Measurements<'a>) -> usize {
+    let (hashed_idx, name_end) = hash_find(s, start);
 
     // skip ';'
     let mut i = name_end + 2;
@@ -187,8 +228,7 @@ fn fast_hash<'a>(s: &'a [u8], start: usize, measurements: &Measurements<'a>) -> 
 // }
 
 fn improved_parsing(file_name: &str) -> Vec<u8> {
-    const NUM_CORES: usize = 8;
-    let measurements = Measurements::new();
+    const NUM_CORES: usize = 1;
     let source = std::fs::File::open(file_name).unwrap();
     let file_len = source.metadata().unwrap().len() as usize;
     let source = unsafe { MmapOptions::new().map(&source).unwrap() };
@@ -206,33 +246,43 @@ fn improved_parsing(file_name: &str) -> Vec<u8> {
     println!("chunk_borders: {:?}", chunk_borders);
     thread::scope(|s| {
         // let sourceref: &[u8] = &source ;
+        let mut handles = vec![];
         for chunk in chunk_borders.iter() {
-            s.spawn(|| {
+            handles.push(s.spawn(|| {
+                let mut measurements = Measurements::new();
                 let mut start = chunk.0;
                 let end = chunk.1;
                 while start < end {
-                    start = fast_hash(&source, start, &measurements);
+                    start = fast_hash(&source, start, &mut measurements);
                 }
-            });
+                measurements
+            }));
         }
-    });
+        let mut measurements: Measurements = handles.pop().unwrap().join().unwrap();
 
-    // println!("{:?}", measurements);
-    // 15 is an estimate of the averge size of
-    let mut result_buffer = Vec::with_capacity(NUM_BUCKETS * 15);
-    result_buffer.push(b'{');
+        // TODO: This is blocking, but shouldn't make a big difference
+        for h in handles {
+            let result = h.join().unwrap();
+            measurements.merge(result);
+        }
 
-    // TODO: check pass by reference
-    measurements
-        .to_sorted()
-        .into_iter()
-        .for_each(|r| write_record(&mut result_buffer, r));
-    // remove last ','
-    result_buffer.pop();
-    result_buffer.push(b'}');
-    // println!("buffer len: {} ", result_buffer.len());
-    result_buffer
-    // println!("\nTook {:?} to process", timer.elapsed());
+        // println!("{:?}", measurements);
+        // 15 is an estimate of the averge size for the output of each city
+        let mut result_buffer = Vec::with_capacity(NUM_BUCKETS * 15);
+        result_buffer.push(b'{');
+
+        // TODO: check pass by reference
+        measurements
+            .to_sorted()
+            .into_iter()
+            .for_each(|r| write_record(&mut result_buffer, r));
+        // remove last ','
+        result_buffer.pop();
+        result_buffer.push(b'}');
+        // println!("buffer len: {} ", result_buffer.len());
+        result_buffer
+        // println!("\nTook {:?} to process", timer.elapsed());
+    })
 }
 
 fn write_record(
@@ -298,7 +348,7 @@ fn generate_results() {
 
 fn main() {
     // generate_results();
-    const N: usize = 1_000_000_000;
+    const N: usize = 10;
     let builder = thread::Builder::new()
         .name("master_thread".to_string())
         .stack_size(size_of::<Measurements>() * 4); // Set the stack size to 4 MB
@@ -309,7 +359,7 @@ fn main() {
     let timer = Instant::now();
     let handle = builder.spawn(move || improved_parsing(&input_name));
     let result = handle.unwrap().join().unwrap();
-    assert_eq!(expected, result.as_slice());
+    assert_eq!(std::str::from_utf8(&expected), std::str::from_utf8(result.as_slice()));
     println!(
         "Took {} to parse {N} measurements",
         timer.elapsed().as_millis()
