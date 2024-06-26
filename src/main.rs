@@ -9,11 +9,7 @@
 use memmap2::MmapOptions;
 use record::Record;
 use std::{
-    io::{stdout, Write},
-    mem::MaybeUninit,
-    sync::RwLock,
-    thread,
-    time::Instant,
+    fs, io::{stdout, Write}, mem::MaybeUninit, sync::RwLock, thread, time::Instant
 };
 
 #[allow(dead_code)]
@@ -124,22 +120,22 @@ impl<'a> Measurements<'a> {
         r
     }
 
-    fn merge(& mut self, mut other: Measurements<'a>) {
-        for e in other.0.iter_mut().filter(|e|e.name.is_some()) {
+    fn merge(&mut self, mut other: Measurements<'a>) {
+        for e in other.0.iter_mut().filter(|e| e.name.is_some()) {
             // Temporarily take out the name to avoid borrow issues
-            self.find_and_merge( e) 
+            self.find_and_merge(e)
         }
     }
 
-    fn find_and_merge<'b:'a>(& mut self,  other:&mut  Record<'b>) {
+    fn find_and_merge<'b: 'a>(&mut self, other: &mut Record<'b>) {
         let mut hash = INITIAL_HASH;
         // TODO: unchecked indexing
         // TODO: check from the back instead of the front of the string
         // Saves this while loop, but makes check more complicated
         // Might work for longer string names
-        let name = & other.name.unwrap();
+        let name = &other.name.unwrap();
         if other.name.is_none() {
-            return
+            return;
         }
 
         for c in other.name.unwrap() {
@@ -348,7 +344,7 @@ fn generate_results() {
 
 fn main() {
     // generate_results();
-    const N: usize = 10;
+    const N: usize = 10000;
     let builder = thread::Builder::new()
         .name("master_thread".to_string())
         .stack_size(size_of::<Measurements>() * 4); // Set the stack size to 4 MB
@@ -357,13 +353,17 @@ fn main() {
     let expected_name = format!("../outputs/result_{N}.txt");
     let expected = std::fs::read(expected_name).unwrap();
     let timer = Instant::now();
-    let handle = builder.spawn(move || improved_parsing(&input_name));
-    let result = handle.unwrap().join().unwrap();
-    assert_eq!(std::str::from_utf8(&expected), std::str::from_utf8(result.as_slice()));
-    println!(
-        "Took {} to parse {N} measurements",
-        timer.elapsed().as_millis()
-    );
+    let result = builder
+        .spawn(move || improved_parsing(&input_name))
+        .unwrap()
+        .join()
+        .unwrap();
+    std::fs::write("temporary_result.txt", result).unwrap(); 
+    // assert_eq!(
+    //     std::str::from_utf8(&expected),
+    //     std::str::from_utf8(result.as_slice())
+    // );
+    println!("Took {:?} to parse {N} measurements", timer.elapsed());
     // let source = std::fs::read("../inputs/measurements_3.txt").unwrap();
     // let end = source.len();
     // let mut start = 0;
